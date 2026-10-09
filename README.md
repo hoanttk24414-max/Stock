@@ -1,4 +1,10 @@
 StockLens — Investment Intelligence Platform
+Cách chạy:
+
+1. Cài Python 3.12 hoặc Anaconda.
+2. Giải nén toàn bộ thư mục StockLens.
+3. Double-click RUN_STOCKLENS.bat.
+4. Hệ thống tự cài thư viện cần thiết và mở dashboard trên trình duyệt.
 StockLens là hệ thống phân tích và đánh giá cơ hội đầu tư cổ phiếu, được xây dựng theo dạng equity research dashboard. Hệ thống hỗ trợ nhiều mã cổ phiếu Việt Nam, tổng hợp dữ liệu thị trường, phân tích kỹ thuật, tài chính, định giá, tin tức và rủi ro thành một Investment Score thống nhất.
 > Dự án phục vụ mục đích học tập và nghiên cứu. Kết quả không phải khuyến nghị mua, bán hoặc nắm giữ chứng khoán.
 ---
