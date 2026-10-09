@@ -120,6 +120,139 @@ div[data-testid="stForm"]{
   border:none!important;color:#fff!important;box-shadow:0 8px 18px rgba(23,111,209,.18)!important;
 }
 
+
+/* =========================================================
+   STREAMLIT 1.65+ LIGHT WIDGET OVERRIDES
+   Giữ giao diện StockLens sáng, đồng nhất trên local/cloud.
+   Chỉ chỉnh presentation; không thay logic phân tích.
+   ========================================================= */
+
+.stApp,
+.stApp input,
+.stApp textarea,
+.stApp button,
+.stApp [data-baseweb="select"]{
+  color-scheme:light!important;
+}
+
+/* Widget labels */
+div[data-testid="stTextInput"] label,
+div[data-testid="stDateInput"] label,
+div[data-testid="stSelectbox"] label,
+div[data-testid="stNumberInput"] label,
+div[data-testid="stMultiSelect"] label,
+div[data-testid="stWidgetLabel"],
+div[data-testid="stWidgetLabel"] p{
+  color:#526B87!important;
+  opacity:1!important;
+  font-weight:700!important;
+}
+
+/* Text input */
+div[data-testid="stTextInput"] div[data-baseweb="input"] > div,
+div[data-testid="stTextInput"] input{
+  background:#FAFDFF!important;
+  color:#173150!important;
+  -webkit-text-fill-color:#173150!important;
+}
+div[data-testid="stTextInput"] div[data-baseweb="input"] > div{
+  border:1px solid #D4E3F2!important;
+  border-radius:10px!important;
+  box-shadow:none!important;
+}
+div[data-testid="stTextInput"] input::placeholder{
+  color:#9AABC0!important;
+  -webkit-text-fill-color:#9AABC0!important;
+  opacity:1!important;
+}
+
+/* Date input */
+div[data-testid="stDateInput"] div[data-baseweb="input"] > div,
+div[data-testid="stDateInput"] input{
+  background:#FAFDFF!important;
+  color:#173150!important;
+  -webkit-text-fill-color:#173150!important;
+}
+div[data-testid="stDateInput"] div[data-baseweb="input"] > div{
+  border:1px solid #D4E3F2!important;
+  border-radius:10px!important;
+  box-shadow:none!important;
+}
+div[data-testid="stDateInput"] svg{
+  color:#5E7691!important;
+  fill:currentColor!important;
+}
+
+/* Selectbox / multiselect */
+div[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+div[data-testid="stMultiSelect"] div[data-baseweb="select"] > div{
+  background:#FAFDFF!important;
+  color:#173150!important;
+  border:1px solid #D4E3F2!important;
+  border-radius:10px!important;
+  box-shadow:none!important;
+}
+div[data-testid="stSelectbox"] div[data-baseweb="select"] *,
+div[data-testid="stMultiSelect"] div[data-baseweb="select"] *{
+  color:#173150!important;
+}
+div[data-testid="stSelectbox"] svg,
+div[data-testid="stMultiSelect"] svg{
+  color:#5E7691!important;
+  fill:currentColor!important;
+}
+
+/* Dropdown portal */
+div[data-baseweb="popover"],
+div[data-baseweb="menu"],
+ul[role="listbox"]{
+  background:#FFFFFF!important;
+  color:#173150!important;
+}
+ul[role="listbox"] li,
+div[role="option"]{
+  background:#FFFFFF!important;
+  color:#173150!important;
+}
+ul[role="listbox"] li:hover,
+div[role="option"]:hover{
+  background:#EEF6FF!important;
+  color:#0F67C0!important;
+}
+
+/* Date calendar popup */
+div[data-baseweb="calendar"]{
+  background:#FFFFFF!important;
+  color:#173150!important;
+}
+div[data-baseweb="calendar"] *{
+  color:#173150;
+}
+
+/* Primary/form submit buttons - Streamlit 1.65+ */
+div[data-testid="stFormSubmitButton"] button,
+button[data-testid="stBaseButton-primaryFormSubmit"],
+button[data-testid="stBaseButton-primary"]{
+  min-height:40px!important;
+  border-radius:10px!important;
+  font-weight:780!important;
+}
+div[data-testid="stFormSubmitButton"] button[kind="primary"],
+button[data-testid="stBaseButton-primaryFormSubmit"],
+button[data-testid="stBaseButton-primary"]{
+  background:linear-gradient(110deg,#176FD1 0%,#1493CC 60%,#11B7AE 100%)!important;
+  border:none!important;
+  color:#FFFFFF!important;
+  -webkit-text-fill-color:#FFFFFF!important;
+  box-shadow:0 8px 18px rgba(23,111,209,.18)!important;
+}
+div[data-testid="stFormSubmitButton"] button[kind="primary"]:hover,
+button[data-testid="stBaseButton-primaryFormSubmit"]:hover,
+button[data-testid="stBaseButton-primary"]:hover{
+  filter:brightness(.97);
+  box-shadow:0 10px 22px rgba(23,111,209,.23)!important;
+}
+
 /* company hero */
 .sl-company{
   background:
