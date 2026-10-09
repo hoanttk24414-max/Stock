@@ -1,27 +1,16 @@
-"""StockLens - Market data loader using DNSE OpenAPI.
+"""StockLens - Market data loader.
 
-Public contract kept compatible with the existing StockLens project:
+Priority:
+    1. DNSE OpenAPI
+    2. vnstock Market fallback ONLY when DNSE cannot be reached (timeout/connection error)
+
+Public contract:
     get_market_data(ticker, start_date, end_date) -> pandas.DataFrame
 
 Returned columns:
     Date, Open, High, Low, Close, Volume
 
-The module does NOT hard-code a stock code and does NOT fall back to synthetic data.
-Credentials are read from environment variables / .env:
-    DNSE_API_KEY=...
-    DNSE_API_SECRET=...
-
-Optional:
-    DNSE_API_BASE_URL=https://openapi.dnse.com.vn
-    DNSE_API_VERSION=2026-07-23
-    DNSE_RESOLUTION=1D
-
-Notes
------
-- DNSE OHLC endpoint: GET /price/ohlc
-- For stocks, DNSE market-data prices are commonly returned in display units
-  (thousand VND). This module auto-detects that format and converts OHLC to VND
-  so the rest of StockLens can continue displaying prices like 58,200 VND.
+No synthetic prices are generated.
 """
 
 from __future__ import annotations
@@ -41,10 +30,8 @@ import requests
 
 try:
     from dotenv import load_dotenv
-
     load_dotenv()
 except ImportError:
-    # The module still works if credentials are supplied as OS environment vars.
     pass
 
 
@@ -52,18 +39,17 @@ REQUIRED = ["Date", "Open", "High", "Low", "Close", "Volume"]
 BASE_URL = os.getenv("DNSE_API_BASE_URL", "https://openapi.dnse.com.vn").rstrip("/")
 API_VERSION = os.getenv("DNSE_API_VERSION", "2026-07-23")
 DEFAULT_RESOLUTION = os.getenv("DNSE_RESOLUTION", "1D")
-TIMEOUT_SECONDS = 30
+
+# Cloud should not wait 30+ seconds before switching to fallback.
+CONNECT_TIMEOUT_SECONDS = float(os.getenv("DNSE_CONNECT_TIMEOUT", "8"))
+READ_TIMEOUT_SECONDS = float(os.getenv("DNSE_READ_TIMEOUT", "30"))
+
+
+class DNSEConnectionError(RuntimeError):
+    """Raised only when DNSE cannot be reached at network level."""
 
 
 def candidate_symbols(ticker: str) -> list[str]:
-    """Normalize a user-entered Vietnam stock ticker for DNSE.
-
-    Examples
-    --------
-    FPT -> ["FPT"]
-    fpt -> ["FPT"]
-    FPT.VN -> ["FPT"]  # convenient when users paste a Yahoo-style symbol
-    """
     symbol = (ticker or "").strip().upper()
     if not symbol:
         return []
@@ -73,18 +59,15 @@ def candidate_symbols(ticker: str) -> list[str]:
 
 
 def _format_dnse_date_header() -> str:
-    """Return DNSE's UTC Date header format, e.g. Thu, 09 Oct 2026 06:30:00 +0000."""
     now = datetime.now(timezone.utc)
     return now.strftime("%a, %d %b %Y %H:%M:%S +0000")
 
 
 def _build_auth_headers(method: str, path: str, api_key: str, api_secret: str) -> dict[str, str]:
-    """Build HMAC headers compatible with DNSE OpenAPI's request-signing scheme."""
     date_value = _format_dnse_date_header()
     nonce = uuid.uuid4().hex
     algorithm = "hmac-sha256"
 
-    # DNSE signs the request path only (query string is not included).
     signing_text = (
         f"(request-target): {method.lower()} {path}\n"
         f"date: {date_value}\n"
@@ -97,7 +80,6 @@ def _build_auth_headers(method: str, path: str, api_key: str, api_secret: str) -
         hashlib.sha256,
     ).digest()
 
-    # DNSE's SDK URL-encodes the Base64 signature.
     signature = quote(base64.b64encode(digest).decode("ascii"), safe="")
 
     signature_header = (
@@ -120,7 +102,6 @@ def _build_auth_headers(method: str, path: str, api_key: str, api_secret: str) -
 
 
 def _to_epoch_seconds(value: pd.Timestamp, end_of_day: bool = False) -> int:
-    """Convert an analysis date to Unix seconds using Vietnam local time."""
     ts = pd.Timestamp(value)
     if ts.tzinfo is None:
         ts = ts.tz_localize("Asia/Ho_Chi_Minh")
@@ -141,7 +122,6 @@ def _pick(d: dict[str, Any], *names: str) -> Any:
 
 
 def _parse_timestamp_series(values: pd.Series) -> pd.Series:
-    """Parse DNSE timestamps whether they arrive as epoch seconds/ms or strings."""
     numeric = pd.to_numeric(values, errors="coerce")
     numeric_non_na = numeric.dropna()
 
@@ -159,17 +139,14 @@ def _parse_timestamp_series(values: pd.Series) -> pd.Series:
 
 
 def _payload_to_frame(payload: Any) -> pd.DataFrame:
-    """Accept common DNSE OHLC response shapes and return standardized columns."""
     if payload is None:
         return pd.DataFrame(columns=REQUIRED)
 
-    # Some APIs wrap the OHLC payload inside "data".
     if isinstance(payload, dict) and "data" in payload:
         nested = payload.get("data")
         if nested is not None:
             payload = nested
 
-    # Shape A: parallel arrays, e.g. {t:[...], o:[...], h:[...], l:[...], c:[...], v:[...]}
     if isinstance(payload, dict):
         t = _pick(payload, "t", "time", "timestamp", "timestamps", "date", "dates")
         o = _pick(payload, "o", "open", "opens")
@@ -180,58 +157,94 @@ def _payload_to_frame(payload: Any) -> pd.DataFrame:
 
         if all(isinstance(x, (list, tuple)) for x in (t, o, h, l, c, v)):
             n = min(len(t), len(o), len(h), len(l), len(c), len(v))
-            return pd.DataFrame(
-                {
-                    "Date": list(t)[:n],
-                    "Open": list(o)[:n],
-                    "High": list(h)[:n],
-                    "Low": list(l)[:n],
-                    "Close": list(c)[:n],
-                    "Volume": list(v)[:n],
-                }
-            )
+            return pd.DataFrame({
+                "Date": list(t)[:n],
+                "Open": list(o)[:n],
+                "High": list(h)[:n],
+                "Low": list(l)[:n],
+                "Close": list(c)[:n],
+                "Volume": list(v)[:n],
+            })
 
-        # Shape B: records may be nested under another conventional key.
         for key in ("items", "rows", "candles", "bars", "result"):
             if isinstance(payload.get(key), list):
                 payload = payload[key]
                 break
 
-    # Shape C: list of candle dictionaries.
     if isinstance(payload, list):
         rows: list[dict[str, Any]] = []
         for item in payload:
             if not isinstance(item, dict):
                 continue
-            rows.append(
-                {
-                    "Date": _pick(item, "t", "time", "timestamp", "date", "tradingDate", "Date"),
-                    "Open": _pick(item, "o", "open", "Open"),
-                    "High": _pick(item, "h", "high", "High"),
-                    "Low": _pick(item, "l", "low", "Low"),
-                    "Close": _pick(item, "c", "close", "Close"),
-                    "Volume": _pick(item, "v", "volume", "Volume"),
-                }
-            )
+            rows.append({
+                "Date": _pick(item, "t", "time", "timestamp", "date", "tradingDate", "Date"),
+                "Open": _pick(item, "o", "open", "Open"),
+                "High": _pick(item, "h", "high", "High"),
+                "Low": _pick(item, "l", "low", "Low"),
+                "Close": _pick(item, "c", "close", "Close"),
+                "Volume": _pick(item, "v", "volume", "Volume"),
+            })
         return pd.DataFrame(rows, columns=REQUIRED)
 
     return pd.DataFrame(columns=REQUIRED)
 
 
-def _normalize(raw: pd.DataFrame | None, symbol: str) -> pd.DataFrame:
-    """Clean DNSE candles and convert stock prices to VND when needed."""
+def _normalize_ohlcv(
+    raw: pd.DataFrame | None,
+    symbol: str,
+    source_name: str,
+) -> pd.DataFrame:
+    """Normalize DNSE/vnstock OHLCV to StockLens format and VND prices."""
     if raw is None or raw.empty:
         empty = pd.DataFrame(columns=REQUIRED)
         empty.attrs["symbol"] = symbol
-        empty.attrs["source"] = "DNSE OpenAPI /price/ohlc"
+        empty.attrs["source"] = source_name
         return empty
 
     df = raw.copy()
+
+    # vnstock Market returns lower-case columns such as:
+    # time, open, high, low, close, volume
+    rename_map = {}
+    for col in df.columns:
+        key = str(col).strip().lower()
+        if key in ("time", "date", "datetime", "timestamp", "tradingdate"):
+            rename_map[col] = "Date"
+        elif key == "open":
+            rename_map[col] = "Open"
+        elif key == "high":
+            rename_map[col] = "High"
+        elif key == "low":
+            rename_map[col] = "Low"
+        elif key == "close":
+            rename_map[col] = "Close"
+        elif key == "volume":
+            rename_map[col] = "Volume"
+
+    df = df.rename(columns=rename_map)
+
     if not all(col in df.columns for col in REQUIRED):
-        return pd.DataFrame(columns=REQUIRED)
+        empty = pd.DataFrame(columns=REQUIRED)
+        empty.attrs["symbol"] = symbol
+        empty.attrs["source"] = source_name
+        return empty
 
     df = df[REQUIRED].copy()
-    df["Date"] = _parse_timestamp_series(df["Date"])
+
+    # DNSE may return epochs; vnstock normally returns datetime-like strings.
+    if pd.api.types.is_numeric_dtype(df["Date"]):
+        df["Date"] = _parse_timestamp_series(df["Date"])
+    else:
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        try:
+            if df["Date"].dt.tz is not None:
+                df["Date"] = (
+                    df["Date"]
+                    .dt.tz_convert("Asia/Ho_Chi_Minh")
+                    .dt.tz_localize(None)
+                )
+        except (AttributeError, TypeError):
+            pass
 
     for col in REQUIRED[1:]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -244,65 +257,53 @@ def _normalize(raw: pd.DataFrame | None, symbol: str) -> pd.DataFrame:
         .reset_index(drop=True)
     )
 
-    # DNSE stock market-data normally uses display prices in thousand VND
-    # (e.g. 58.2 means 58,200 VND). Auto-detect instead of blindly multiplying.
+    # Both DNSE and vnstock/KBS commonly expose VN stock prices in thousand VND.
+    # Detect instead of blindly multiplying.
     if not df.empty:
         median_close = float(df["Close"].median())
         if 0 < median_close < 1000:
             for col in ("Open", "High", "Low", "Close"):
                 df[col] = df[col] * 1000.0
-            df.attrs["dnse_raw_price_unit"] = "thousand VND"
+            df.attrs["raw_price_unit"] = "thousand VND"
         else:
-            df.attrs["dnse_raw_price_unit"] = "VND or provider-native"
+            df.attrs["raw_price_unit"] = "VND or provider-native"
 
     df.attrs["symbol"] = symbol
-    df.attrs["source"] = "DNSE OpenAPI /price/ohlc"
+    df.attrs["source"] = source_name
     df.attrs["price_unit"] = "VND"
     df.attrs["resolution"] = DEFAULT_RESOLUTION
     return df
 
 
-def get_market_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """Fetch historical daily OHLCV from DNSE for one Vietnam stock ticker.
+def _filter_window(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    if df.empty:
+        return df
 
-    Parameters
-    ----------
-    ticker:
-        Stock symbol such as FPT, HPG, MWG. ``FPT.VN`` is also accepted and
-        automatically normalized to ``FPT`` for DNSE.
-    start_date, end_date:
-        Inclusive analysis window, e.g. ``2025-01-01`` and ``2026-10-09``.
+    start_day = start.normalize().tz_localize(None) if start.tzinfo else start.normalize()
+    end_day = end.normalize().tz_localize(None) if end.tzinfo else end.normalize()
 
-    Returns
-    -------
-    pandas.DataFrame
-        Standardized columns: Date, Open, High, Low, Close, Volume.
-        If DNSE returns no candles, an empty DataFrame is returned.
+    out = df.loc[
+        (df["Date"].dt.normalize() >= start_day)
+        & (df["Date"].dt.normalize() <= end_day)
+    ].reset_index(drop=True)
 
-    Raises
-    ------
-    ValueError
-        Invalid ticker/date input or missing credentials.
-    RuntimeError
-        DNSE authentication/network/API errors.
-    """
-    symbols = candidate_symbols(ticker)
-    if not symbols:
-        raise ValueError("Mã cổ phiếu không được để trống.")
-    symbol = symbols[0]
+    # Preserve metadata after slicing/reset_index.
+    out.attrs.update(df.attrs)
+    return out
 
-    start = pd.Timestamp(start_date)
-    end = pd.Timestamp(end_date)
-    if pd.isna(start) or pd.isna(end):
-        raise ValueError("Ngày bắt đầu/kết thúc không hợp lệ.")
-    if start > end:
-        raise ValueError("Ngày bắt đầu phải trước hoặc bằng ngày kết thúc.")
 
+def _get_dnse_market_data(
+    symbol: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> pd.DataFrame:
+    """Primary source. Network failure is distinguishable from API/auth errors."""
     api_key = (os.getenv("DNSE_API_KEY") or os.getenv("api-key") or "").strip()
     api_secret = (os.getenv("DNSE_API_SECRET") or os.getenv("secret-key") or "").strip()
+
     if not api_key or not api_secret:
         raise ValueError(
-            "Chưa cấu hình DNSE API. Hãy tạo file .env với DNSE_API_KEY và DNSE_API_SECRET."
+            "Chưa cấu hình DNSE API. Hãy cấu hình DNSE_API_KEY và DNSE_API_SECRET."
         )
 
     path = "/price/ohlc"
@@ -313,7 +314,6 @@ def get_market_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame
         "to": _to_epoch_seconds(end, end_of_day=True),
         "type": "STOCK",
     }
-
     headers = _build_auth_headers("GET", path, api_key, api_secret)
 
     try:
@@ -321,15 +321,19 @@ def get_market_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame
             f"{BASE_URL}{path}",
             params=params,
             headers=headers,
-            timeout=TIMEOUT_SECONDS,
+            timeout=(CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS),
         )
+    except (requests.Timeout, requests.ConnectionError) as exc:
+        raise DNSEConnectionError(f"Không kết nối được DNSE OpenAPI: {exc}") from exc
     except requests.RequestException as exc:
-        raise RuntimeError(f"Không kết nối được DNSE OpenAPI: {exc}") from exc
+        # Other request-level transport errors are also suitable for fallback.
+        raise DNSEConnectionError(f"Lỗi kết nối DNSE OpenAPI: {exc}") from exc
 
+    # Authentication/configuration errors are NOT hidden by fallback.
     if response.status_code in (401, 403):
         raise RuntimeError(
             "DNSE từ chối xác thực (HTTP "
-            f"{response.status_code}). Kiểm tra API Key/API Secret, trạng thái key và thời gian hệ thống Windows."
+            f"{response.status_code}). Kiểm tra API Key/API Secret và trạng thái key."
         )
     if response.status_code == 429:
         raise RuntimeError("DNSE giới hạn tần suất gọi API (HTTP 429). Hãy thử lại sau.")
@@ -346,41 +350,126 @@ def get_market_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame
             raise RuntimeError("DNSE trả về dữ liệu không phải JSON hợp lệ.") from exc
 
     raw_df = _payload_to_frame(payload)
-    df = _normalize(raw_df, symbol)
+    df = _normalize_ohlcv(
+        raw_df,
+        symbol,
+        source_name="DNSE OpenAPI /price/ohlc",
+    )
+    return _filter_window(df, start, end)
+
+
+def _get_vnstock_market_data(
+    symbol: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> pd.DataFrame:
+    """Fallback source used only after a DNSE network failure."""
+    from vnstock import Market
+
+    start_text = start.strftime("%Y-%m-%d")
+    end_text = end.strftime("%Y-%m-%d")
+
+    market = Market()
+    raw = market.equity(symbol).ohlcv(
+        start=start_text,
+        end=end_text,
+        interval="1D",
+    )
+
+    if raw is None:
+        raw = pd.DataFrame()
+    elif not isinstance(raw, pd.DataFrame):
+        raw = pd.DataFrame(raw)
+
+    df = _normalize_ohlcv(
+        raw,
+        symbol,
+        source_name="vnstock Market fallback",
+    )
+    df = _filter_window(df, start, end)
 
     if df.empty:
-        df.attrs["request_params"] = {
-            "symbol": symbol,
-            "resolution": DEFAULT_RESOLUTION,
-            "from": start.strftime("%Y-%m-%d"),
-            "to": end.strftime("%Y-%m-%d"),
-        }
-        return df
+        raise RuntimeError(
+            f"vnstock không trả dữ liệu OHLCV hợp lệ cho {symbol} "
+            f"trong khoảng {start_text} → {end_text}."
+        )
 
-    # Final defensive filter to the user's inclusive analysis window.
-    start_day = start.normalize().tz_localize(None) if start.tzinfo else start.normalize()
-    end_day = end.normalize().tz_localize(None) if end.tzinfo else end.normalize()
-    mask = (df["Date"].dt.normalize() >= start_day) & (df["Date"].dt.normalize() <= end_day)
-    df = df.loc[mask].reset_index(drop=True)
-
-    df.attrs["symbol"] = symbol
-    df.attrs["source"] = "DNSE OpenAPI /price/ohlc"
-    df.attrs["price_unit"] = "VND"
-    df.attrs["resolution"] = DEFAULT_RESOLUTION
+    df.attrs["fallback_used"] = True
+    df.attrs["primary_source"] = "DNSE OpenAPI"
     return df
 
 
+def get_market_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """Get StockLens OHLCV with DNSE -> vnstock fallback.
+
+    Logic
+    -----
+    DNSE OK:
+        Return DNSE data.
+
+    DNSE timeout / connection failure:
+        Automatically use vnstock Market.
+
+    DNSE auth/API error:
+        Raise the DNSE error directly. This prevents bad credentials or API
+        configuration from being silently hidden by fallback.
+
+    DNSE network failure + vnstock failure:
+        Raise one combined error containing both causes.
+    """
+    symbols = candidate_symbols(ticker)
+    if not symbols:
+        raise ValueError("Mã cổ phiếu không được để trống.")
+    symbol = symbols[0]
+
+    start = pd.Timestamp(start_date)
+    end = pd.Timestamp(end_date)
+
+    if pd.isna(start) or pd.isna(end):
+        raise ValueError("Ngày bắt đầu/kết thúc không hợp lệ.")
+    if start > end:
+        raise ValueError("Ngày bắt đầu phải trước hoặc bằng ngày kết thúc.")
+
+    try:
+        df = _get_dnse_market_data(symbol, start, end)
+
+        if df.empty:
+            # DNSE connected successfully but returned no candles.
+            # Do not silently substitute another provider in this case.
+            df.attrs["request_params"] = {
+                "symbol": symbol,
+                "resolution": DEFAULT_RESOLUTION,
+                "from": start.strftime("%Y-%m-%d"),
+                "to": end.strftime("%Y-%m-%d"),
+            }
+
+        df.attrs["fallback_used"] = False
+        return df
+
+    except DNSEConnectionError as dnse_error:
+        try:
+            df = _get_vnstock_market_data(symbol, start, end)
+            df.attrs["fallback_reason"] = str(dnse_error)
+            return df
+        except Exception as vnstock_error:
+            raise RuntimeError(
+                "Không lấy được dữ liệu thị trường từ cả hai nguồn. "
+                f"DNSE: {dnse_error} | "
+                f"vnstock fallback: {vnstock_error}"
+            ) from vnstock_error
+
+
 if __name__ == "__main__":
-    # Smoke test only. It uses credentials from .env and never prints secrets.
     test_symbol = os.getenv("DNSE_TEST_SYMBOL", "FPT")
     test_start = os.getenv("DNSE_TEST_START", "2026-01-01")
     test_end = os.getenv("DNSE_TEST_END", "2026-10-09")
 
     try:
         data = get_market_data(test_symbol, test_start, test_end)
-        print(f"DNSE market data: {test_symbol} | rows={len(data)}")
+        print(f"StockLens market data: {test_symbol} | rows={len(data)}")
+        print("Source:", data.attrs.get("source"))
+        print("Fallback used:", data.attrs.get("fallback_used"))
         if not data.empty:
             print(data.tail())
-            print("Source:", data.attrs.get("source"))
     except Exception as exc:
         print(f"ERROR: {exc}")
